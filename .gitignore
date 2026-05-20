@@ -1,0 +1,16 @@
+# Binaries
+vpaste
+vpaste-daemon
+
+# Local config (contains secrets)
+config.yaml
+
+# Temp files
+/tmp/
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

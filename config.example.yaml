@@ -1,0 +1,11 @@
+# vpaste 配置文件
+# 复制到 ~/.config/vpaste/config.yaml 并填入你的配置
+
+secret_id: "your_cos_secret_id"
+secret_key: "your_cos_secret_key"
+# token: ""  # 可选，临时凭证时使用
+
+bucket: "your-bucket-name-1234567890"
+region: "ap-shanghai"
+cdn_domain: "cdn.your-domain.com"
+upload_path: "vpaste/temp"
