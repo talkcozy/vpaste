@@ -9,13 +9,14 @@ import (
 )
 
 type Config struct {
-	SecretID     string `yaml:"secret_id"`
-	SecretKey    string `yaml:"secret_key"`
-	Token        string `yaml:"token"`
-	Bucket       string `yaml:"bucket"`
-	Region       string `yaml:"region"`
-	CDNDomain    string `yaml:"cdn_domain"`
-	UploadPath   string `yaml:"upload_path"`
+	SecretID           string `yaml:"secret_id"`
+	SecretKey          string `yaml:"secret_key"`
+	Token              string `yaml:"token"`
+	Bucket             string `yaml:"bucket"`
+	Region             string `yaml:"region"`
+	CDNDomain          string `yaml:"cdn_domain"`
+	UploadPath         string `yaml:"upload_path"`
+	TempRetentionHours int    `yaml:"temp_retention_hours"` // 临时文件保留时间（小时），默认24
 }
 
 func Load() (*Config, error) {
@@ -37,6 +38,9 @@ func Load() (*Config, error) {
 
 	if cfg.UploadPath == "" {
 		cfg.UploadPath = "vpaste/temp"
+	}
+	if cfg.TempRetentionHours <= 0 {
+		cfg.TempRetentionHours = 24 // 默认保留24小时
 	}
 
 	return &cfg, nil

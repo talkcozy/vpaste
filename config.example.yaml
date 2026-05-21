@@ -9,3 +9,6 @@ bucket: "your-bucket-name-1234567890"
 region: "ap-shanghai"
 cdn_domain: "cdn.your-domain.com"
 upload_path: "vpaste/temp"
+
+# 临时文件自动清理配置
+# temp_retention_hours: 24  # 文件保留时间（小时），默认24小时，超过此时间的文件会被清理
