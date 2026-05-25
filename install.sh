@@ -17,8 +17,8 @@ echo "编译 vpaste..."
 cd "$SCRIPT_DIR"
 go build -o vpaste .
 
-# 3. 编译 vpaste-daemon (快捷键监听器)
-echo "编译快捷键监听器..."
+# 3. 编译 vpaste-daemon (Swift)
+echo "编译菜单栏守护进程..."
 swiftc -o vpaste-daemon daemon/main.swift
 
 # 4. 安装到用户目录
@@ -38,11 +38,10 @@ if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
     export PATH="$INSTALL_DIR:$PATH"
 fi
 
-# 6. 创建配置目录
+# 6. 配置目录
 CONFIG_DIR="$HOME/.config/vpaste"
 mkdir -p "$CONFIG_DIR"
 
-# 7. 如果配置文件不存在，复制
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
     if [ -f "$SCRIPT_DIR/config.yaml" ]; then
         cp "$SCRIPT_DIR/config.yaml" "$CONFIG_DIR/config.yaml"
@@ -52,7 +51,7 @@ if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
     fi
 fi
 
-# 8. 安装 Launch Agent (自动启动守护进程)
+# 7. 安装 Launch Agent
 LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.vpaste.daemon.plist"
 
 cat > "$LAUNCH_AGENT" << EOF
@@ -71,17 +70,18 @@ cat > "$LAUNCH_AGENT" << EOF
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/vpaste-daemon.log</string>
+    <string>/tmp/vpaste_daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/vpaste-daemon.log</string>
+    <string>/tmp/vpaste_daemon.log</string>
 </dict>
 </plist>
 EOF
 
-# 9. 启动守护进程
-echo "启动快捷键监听服务..."
-launchctl unload "$LAUNCH_AGENT" 2>/dev/null || true
-launchctl load "$LAUNCH_AGENT"
+# 8. 重启守护进程
+echo "重启守护进程..."
+launchctl bootout gui/$(id -u)/com.vpaste.daemon 2>/dev/null || true
+sleep 1
+launchctl bootstrap gui/$(id -u) "$LAUNCH_AGENT"
 
 echo ""
 echo "=== 安装完成 ==="
@@ -90,14 +90,18 @@ echo "安装位置:"
 echo "  CLI:     $INSTALL_DIR/vpaste"
 echo "  Daemon:  $INSTALL_DIR/vpaste-daemon"
 echo "配置:     $CONFIG_DIR/config.yaml"
-echo "快捷键:   Cmd+Alt+V (立即生效)"
+echo "快捷键:   Cmd+Alt+V"
+echo ""
+echo "状态栏菜单:"
+echo "  - 点击 [V] 图标上传剪贴板图片"
+echo "  - 查看历史上传记录"
 echo ""
 echo "⚠️  首次使用需要授予辅助功能权限:"
-echo "    系统设置 → 隐私与安全性 → 辅助功能 → 添加 vpaste-daemon"
+echo "    系统设置 → 隐私与安全性 → 辅助功能 → 点 + 添加 $INSTALL_DIR/vpaste-daemon"
 echo ""
 echo "使用方法:"
 echo "    1. 截图或复制图片到剪贴板"
-echo "    2. 按 Cmd+Alt+V"
+echo "    2. 按 Cmd+Alt+V 或点击状态栏图标"
 echo "    3. CDN URL 自动粘贴到光标位置"
 echo ""
-echo "查看日志: tail -f /tmp/vpaste-daemon.log"
+echo "查看日志: tail -f /tmp/vpaste_daemon.log"
