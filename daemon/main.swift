@@ -1,5 +1,4 @@
 import Cocoa
-import Carbon
 
 // MARK: - Logging
 
@@ -293,18 +292,41 @@ class HistoryDelegate: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 }
 
-// MARK: - Carbon HotKey
+// MARK: - CGEventTap Keyboard Monitor
 
-var hotKeyRef: EventHotKeyRef?
+func setupKeyboardMonitor() {
+    let mask = (1 << CGEventType.keyDown.rawValue)
 
-private func hotKeyHandler(
-    nextHandler: EventHandlerCallRef?,
-    event: EventRef?,
-    refcon: UnsafeMutableRawPointer?
-) -> OSStatus {
-    vlog("HotKey pressed!")
-    DispatchQueue.main.async { runVPaste() }
-    return noErr
+    guard let tap = CGEvent.tapCreate(
+        tap: .cgSessionEventTap,
+        place: .headInsertEventTap,
+        options: .listenOnly,
+        eventsOfInterest: CGEventMask(mask),
+        callback: { _, _, event, _ -> Unmanaged<CGEvent>? in
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            let flags = event.flags
+
+            let isCmd = flags.contains(.maskCommand)
+            let isAlt = flags.contains(.maskAlternate)
+            let isV = keyCode == 9
+
+            if isV && isCmd && isAlt {
+                vlog("Cmd+Alt+V detected!")
+                DispatchQueue.main.async { runVPaste() }
+            }
+            return nil
+        },
+        userInfo: nil
+    ) else {
+        vlog("Failed to create CGEvent tap - check Accessibility permissions")
+        vlog("System Settings > Privacy & Security > Accessibility")
+        return
+    }
+
+    let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+    CGEvent.tapEnable(tap: tap, enable: true)
+    vlog("Keyboard monitor active (Cmd+Alt+V)")
 }
 
 // MARK: - Menu Actions
@@ -345,26 +367,12 @@ menu.addItem(withTitle: "退出 VPaste", action: #selector(NSApplication.termina
 menu.delegate = menuActions
 statusItem.menu = menu
 
-// Carbon hotkey: Cmd+Alt+V
-var eventSpec = EventTypeSpec(
-    eventClass: OSType(kEventClassKeyboard),
-    eventKind: UInt32(kEventHotKeyPressed)
-)
-InstallEventHandler(GetEventDispatcherTarget(), hotKeyHandler, 1, &eventSpec, nil, nil)
+// Keyboard monitor
+setupKeyboardMonitor()
 
-var hkID = EventHotKeyID()
-hkID.signature = OSType(0x56505354) // "VPST"
-hkID.id = 1
-let hkStatus = RegisterEventHotKey(
-    0x09, // V key
-    UInt32(cmdKey | optionKey),
-    hkID,
-    GetEventDispatcherTarget(),
-    0,
-    &hotKeyRef
-)
+// Keep run loop active (required for CGEvent tap on macOS 26)
+Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { _ in }
 
-vlog("Hotkey status: \(hkStatus)")
 vlog("Daemon started - Cmd+Alt+V to upload")
 
-RunLoop.main.run()
+app.run()
