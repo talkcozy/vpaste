@@ -14,7 +14,11 @@ import (
 func main() {
 	// 检查子命令
 	if len(os.Args) > 1 && os.Args[1] == "clean" {
-		if err := runClean(); err != nil {
+		hours := 0
+		if len(os.Args) > 2 {
+			fmt.Sscanf(os.Args[2], "%d", &hours)
+		}
+		if err := runClean(hours); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -115,7 +119,7 @@ func cleanupOldFiles(ctx context.Context, client *cos.COSClient, database *db.DB
 	}
 }
 
-func runClean() error {
+func runClean(hoursOverride int) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config error: %w", err)
@@ -133,6 +137,9 @@ func runClean() error {
 
 	ctx := context.Background()
 	hours := cfg.TempRetentionHours
+	if hoursOverride > 0 {
+		hours = hoursOverride
+	}
 
 	fmt.Printf("Cleaning up files older than %d hours...\n", hours)
 

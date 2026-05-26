@@ -25,6 +25,31 @@ struct RecordsDB: Codable {
 
 // MARK: - VPaste Execution
 
+func runClean(hours: Int) {
+    vlog("Cleaning image bed (older than \(hours)h)...")
+
+    let vpastePath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/bin/vpaste").path
+
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    task.arguments = ["-c", "\(vpastePath) clean \(hours)"]
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = pipe
+
+    do {
+        try task.run()
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        vlog("Clean result: \(output)")
+    } catch {
+        vlog("Clean error: \(error)")
+    }
+}
+
 func runVPaste() {
     vlog("Running upload...")
 
@@ -344,6 +369,18 @@ class MenuActions: NSObject, NSMenuDelegate {
     @objc func refresh() {
         loadRecords()
     }
+
+    @objc func clean7d() {
+        DispatchQueue.global(qos: .userInitiated).async { runClean(hours: 168) }
+    }
+
+    @objc func clean3d() {
+        DispatchQueue.global(qos: .userInitiated).async { runClean(hours: 72) }
+    }
+
+    @objc func clean1d() {
+        DispatchQueue.global(qos: .userInitiated).async { runClean(hours: 24) }
+    }
 }
 
 // MARK: - Main
@@ -362,6 +399,15 @@ if let button = statusItem.button {
 let menu = NSMenu()
 menu.addItem(withTitle: "上传剪贴板图片", action: #selector(MenuActions.upload), keyEquivalent: "")
 menu.addItem(withTitle: "历史记录", action: #selector(MenuActions.history), keyEquivalent: "")
+
+let cleanMenu = NSMenu()
+cleanMenu.addItem(withTitle: "7 天前上传的", action: #selector(MenuActions.clean7d), keyEquivalent: "")
+cleanMenu.addItem(withTitle: "3 天前上传的", action: #selector(MenuActions.clean3d), keyEquivalent: "")
+cleanMenu.addItem(withTitle: "1 天前上传的", action: #selector(MenuActions.clean1d), keyEquivalent: "")
+let cleanItem = NSMenuItem(title: "清理图床", action: nil, keyEquivalent: "")
+cleanItem.submenu = cleanMenu
+menu.addItem(cleanItem)
+
 menu.addItem(.separator())
 menu.addItem(withTitle: "退出 VPaste", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 menu.delegate = menuActions
