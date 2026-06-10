@@ -1,4 +1,5 @@
 import Cocoa
+import Carbon
 
 // MARK: - Logging
 
@@ -317,46 +318,381 @@ class HistoryDelegate: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 }
 
-// MARK: - CGEventTap Keyboard Monitor
+// MARK: - YAML Config (simple flat key-value)
 
-func setupKeyboardMonitor() {
-    let mask = (1 << CGEventType.keyDown.rawValue)
+struct VPasteConfig {
+    var secretID: String = ""
+    var secretKey: String = ""
+    var token: String = ""
+    var bucket: String = ""
+    var region: String = "ap-shanghai"
+    var cdnDomain: String = ""
+    var uploadPath: String = "vpaste/temp"
+    var tempRetentionHours: Int = 24
+}
 
-    guard let tap = CGEvent.tapCreate(
-        tap: .cgSessionEventTap,
-        place: .headInsertEventTap,
-        options: .listenOnly,
-        eventsOfInterest: CGEventMask(mask),
-        callback: { _, _, event, _ -> Unmanaged<CGEvent>? in
-            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-            let flags = event.flags
+func configFilePath() -> String {
+    FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/vpaste/config.yaml").path
+}
 
-            let isCmd = flags.contains(.maskCommand)
-            let isAlt = flags.contains(.maskAlternate)
-            let isV = keyCode == 9
+func loadVPasteConfig() -> VPasteConfig {
+    var cfg = VPasteConfig()
+    guard let data = FileManager.default.contents(atPath: configFilePath()),
+          let content = String(data: data, encoding: .utf8) else {
+        return cfg
+    }
+    for line in content.components(separatedBy: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.hasPrefix("#"), trimmed.contains(":") else { continue }
+        let parts = trimmed.components(separatedBy: ":")
+        guard parts.count >= 2 else { continue }
+        let key = parts[0].trimmingCharacters(in: .whitespaces)
+        let val = parts.dropFirst().joined(separator: ":")
+            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        switch key {
+        case "secret_id": cfg.secretID = val
+        case "secret_key": cfg.secretKey = val
+        case "token": cfg.token = val
+        case "bucket": cfg.bucket = val
+        case "region": cfg.region = val
+        case "cdn_domain": cfg.cdnDomain = val
+        case "upload_path": cfg.uploadPath = val
+        case "temp_retention_hours":
+            if let n = Int(val) { cfg.tempRetentionHours = n }
+        default: break
+        }
+    }
+    return cfg
+}
 
-            if isV && isCmd && isAlt {
-                vlog("Cmd+Alt+V detected!")
-                DispatchQueue.main.async { runVPaste() }
-            }
-            return nil
-        },
-        userInfo: nil
-    ) else {
-        vlog("Failed to create CGEvent tap - check Accessibility permissions")
-        vlog("System Settings > Privacy & Security > Accessibility")
+func saveVPasteConfig(_ cfg: VPasteConfig) -> Bool {
+    var lines: [String] = []
+    lines.append("secret_id: \"\(cfg.secretID)\"")
+    lines.append("secret_key: \"\(cfg.secretKey)\"")
+    if !cfg.token.isEmpty {
+        lines.append("token: \"\(cfg.token)\"")
+    }
+    lines.append("bucket: \"\(cfg.bucket)\"")
+    lines.append("region: \"\(cfg.region)\"")
+    if !cfg.cdnDomain.isEmpty {
+        lines.append("cdn_domain: \"\(cfg.cdnDomain)\"")
+    }
+    lines.append("upload_path: \"\(cfg.uploadPath)\"")
+    lines.append("temp_retention_hours: \(cfg.tempRetentionHours)")
+    let content = lines.joined(separator: "\n") + "\n"
+    let path = configFilePath()
+    let dir = (path as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    do {
+        try content.write(toFile: path, atomically: true, encoding: .utf8)
+        return true
+    } catch {
+        vlog("Failed to save config: \(error)")
+        return false
+    }
+}
+
+// MARK: - Settings Window
+
+var settingsWindow: NSWindow?
+
+let regionOptions = [
+    ("ap-beijing", "北京"),
+    ("ap-nanjing", "南京"),
+    ("ap-shanghai", "上海"),
+    ("ap-guangzhou", "广州"),
+    ("ap-chengdu", "成都"),
+    ("ap-chongqing", "重庆"),
+    ("ap-hongkong", "中国香港"),
+    ("ap-singapore", "新加坡"),
+    ("ap-tokyo", "东京"),
+    ("na-siliconvalley", "硅谷"),
+    ("na-ashburn", "弗吉尼亚"),
+    ("eu-frankfurt", "法兰克福"),
+]
+
+func showSettingsWindow() {
+    if let w = settingsWindow {
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         return
     }
 
-    let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-    CGEvent.tapEnable(tap: tap, enable: true)
-    vlog("Keyboard monitor active (Cmd+Alt+V)")
+    let cfg = loadVPasteConfig()
+
+    let w = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
+        styleMask: [.titled, .closable],
+        backing: .buffered,
+        defer: false
+    )
+    w.title = "VPaste 设置"
+    w.isReleasedWhenClosed = false
+    w.center()
+
+    guard let cv = w.contentView else { return }
+
+    // --- Helper to create form rows ---
+    var currentY: CGFloat = 420
+    let labelWidth: CGFloat = 130
+    let fieldX: CGFloat = 150
+    let fieldWidth: CGFloat = 340
+    let rowHeight: CGFloat = 28
+    let sectionGap: CGFloat = 16
+    let rowGap: CGFloat = 6
+
+    func addSection(_ title: String) {
+        currentY -= sectionGap
+        let label = NSTextField(labelWithString: title)
+        label.font = NSFont.boldSystemFont(ofSize: 13)
+        label.textColor = .secondaryLabelColor
+        label.frame = NSRect(x: 20, y: currentY, width: 480, height: 16)
+        cv.addSubview(label)
+        currentY -= 20
+    }
+
+    func addRow(_ title: String, secure: Bool = false) -> NSTextField {
+        currentY -= rowGap
+        let label = NSTextField(labelWithString: title)
+        label.font = NSFont.systemFont(ofSize: 13)
+        label.alignment = .right
+        label.frame = NSRect(x: 20, y: currentY, width: labelWidth - 8, height: rowHeight)
+        cv.addSubview(label)
+
+        let field: NSTextField
+        if secure {
+            let sf = NSSecureTextField(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
+            field = sf
+        } else {
+            field = NSTextField(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
+        }
+        field.font = NSFont.systemFont(ofSize: 13)
+        cv.addSubview(field)
+        currentY -= rowHeight
+        return field
+    }
+
+    // --- COS Section ---
+    addSection("腾讯云 COS 配置")
+    let secretIDField = addRow("Secret ID:")
+    secretIDField.stringValue = cfg.secretID
+    let secretKeyField = addRow("Secret Key:", secure: true)
+    secretKeyField.stringValue = cfg.secretKey
+    let tokenField = addRow("Token:")
+    tokenField.stringValue = cfg.token
+    let bucketField = addRow("存储桶:")
+    bucketField.stringValue = cfg.bucket
+
+    // Region popup
+    currentY -= rowGap
+    let regionLabel = NSTextField(labelWithString: "地域:")
+    regionLabel.font = NSFont.systemFont(ofSize: 13)
+    regionLabel.alignment = .right
+    regionLabel.frame = NSRect(x: 20, y: currentY, width: labelWidth - 8, height: rowHeight)
+    cv.addSubview(regionLabel)
+
+    let regionPopup = NSPopUpButton(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
+    for (code, name) in regionOptions {
+        regionPopup.addItem(withTitle: "\(code) (\(name))")
+        regionPopup.lastItem?.representedObject = code
+    }
+    // Select current region
+    if let idx = regionOptions.firstIndex(where: { $0.0 == cfg.region }) {
+        regionPopup.selectItem(at: idx)
+    }
+    cv.addSubview(regionPopup)
+    currentY -= rowHeight
+
+    // --- Upload Section ---
+    addSection("上传配置")
+    let uploadPathField = addRow("上传路径:")
+    uploadPathField.stringValue = cfg.uploadPath
+    let cdnDomainField = addRow("CDN 域名:")
+    cdnDomainField.stringValue = cfg.cdnDomain
+
+    // --- Cleanup Section ---
+    addSection("自动清理")
+    let retentionField = addRow("保留时间(小时):")
+    retentionField.stringValue = "\(cfg.tempRetentionHours)"
+
+    // --- Buttons ---
+    currentY -= 20
+    let buttonY = currentY
+
+    let saveBtn = NSButton(title: "保存", target: nil, action: #selector(MenuActions.saveSettings))
+    saveBtn.bezelStyle = .rounded
+    saveBtn.frame = NSRect(x: 380, y: buttonY, width: 80, height: 28)
+    cv.addSubview(saveBtn)
+
+    let cancelBtn = NSButton(title: "取消", target: nil, action: #selector(MenuActions.closeSettings))
+    cancelBtn.bezelStyle = .rounded
+    cancelBtn.frame = NSRect(x: 290, y: buttonY, width: 80, height: 28)
+    cv.addSubview(cancelBtn)
+
+    let testBtn = NSButton(title: "测试连接", target: nil, action: #selector(MenuActions.testConnection))
+    testBtn.bezelStyle = .rounded
+    testBtn.frame = NSRect(x: 20, y: buttonY, width: 90, height: 28)
+    cv.addSubview(testBtn)
+
+    // Store references for save
+    let fields = SettingsFields()
+    fields.secretIDField = secretIDField
+    fields.secretKeyField = secretKeyField
+    fields.tokenField = tokenField
+    fields.bucketField = bucketField
+    fields.regionPopup = regionPopup
+    fields.uploadPathField = uploadPathField
+    fields.cdnDomainField = cdnDomainField
+    fields.retentionField = retentionField
+    fields.window = w
+    objc_setAssociatedObject(w, "fields", fields, .OBJC_ASSOCIATION_RETAIN)
+
+    saveBtn.target = menuActions
+    cancelBtn.target = menuActions
+    testBtn.target = menuActions
+
+    settingsWindow = w
+    w.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+}
+
+class SettingsFields: NSObject {
+    weak var secretIDField: NSTextField?
+    weak var secretKeyField: NSTextField?
+    weak var tokenField: NSTextField?
+    weak var bucketField: NSTextField?
+    weak var regionPopup: NSPopUpButton?
+    weak var uploadPathField: NSTextField?
+    weak var cdnDomainField: NSTextField?
+    weak var retentionField: NSTextField?
+    weak var window: NSWindow?
+}
+
+// MARK: - Carbon Global Hotkey (Cmd+Alt+V)
+
+var hotkeyRef: EventHotKeyRef?
+
+private let kVK_ANSI_V: UInt32 = 9
+private let kVK_Command: UInt32 = 0x37
+
+func hotkeyHandler(_: EventHandlerCallRef?, _ event: EventRef?, _: UnsafeMutableRawPointer?) -> OSStatus {
+    var hotkeyID = EventHotKeyID()
+    GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                      nil, MemoryLayout<EventHotKeyID>.size, nil, &hotkeyID)
+    if hotkeyID.id == 1 {
+        DispatchQueue.main.async { runVPaste() }
+    }
+    return noErr
+}
+
+func setupCarbonHotkey() {
+    var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                  eventKind: UInt32(kEventHotKeyPressed))
+
+    InstallEventHandler(GetApplicationEventTarget(), hotkeyHandler, 1, &eventType, nil, nil)
+
+    let signature: OSType = 0x56505354 // "VPST"
+    let hotkeyID = EventHotKeyID(signature: signature, id: 1)
+    RegisterEventHotKey(kVK_ANSI_V, UInt32(cmdKey | optionKey), hotkeyID,
+                        GetApplicationEventTarget(), 0, &hotkeyRef)
+
+    vlog("Carbon hotkey registered: Cmd+Option+V")
+}
+
+func unregisterCarbonHotkey() {
+    if let ref = hotkeyRef {
+        UnregisterEventHotKey(ref)
+        hotkeyRef = nil
+    }
+}
+
+// MARK: - Accessibility Permission Check
+
+var authWindow: NSWindow?
+var accessibilityPollTimer: Timer?
+
+func checkAccessibility() {
+    if AXIsProcessTrusted() {
+        vlog("Accessibility: already trusted")
+        setupCarbonHotkey()
+        return
+    }
+
+    vlog("Accessibility: not trusted, showing authorization window")
+    showAuthWindow()
+
+    accessibilityPollTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
+        if AXIsProcessTrusted() {
+            timer.invalidate()
+            accessibilityPollTimer = nil
+            vlog("Accessibility: granted!")
+            DispatchQueue.main.async {
+                authWindow?.close()
+                authWindow = nil
+                setupCarbonHotkey()
+            }
+        }
+    }
+}
+
+func showAuthWindow() {
+    if let w = authWindow {
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        return
+    }
+
+    let w = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 420, height: 220),
+        styleMask: [.titled, .closable],
+        backing: .buffered,
+        defer: false
+    )
+    w.title = "VPaste 需要辅助功能权限"
+    w.isReleasedWhenClosed = false
+    w.center()
+
+    guard let cv = w.contentView else { return }
+
+    let desc = NSTextField(labelWithString:
+        "VPaste 需要辅助功能权限来监听全局快捷键 (Cmd+Option+V)。\n\n请在系统设置中授权后，快捷键将自动激活。")
+    desc.font = NSFont.systemFont(ofSize: 13)
+    desc.textColor = .labelColor
+    desc.frame = NSRect(x: 24, y: 110, width: 372, height: 80)
+    desc.isEditable = false
+    desc.isSelectable = false
+    cv.addSubview(desc)
+
+    let openBtn = NSButton(title: "打开系统设置", target: menuActions, action: #selector(MenuActions.openAccessibilitySettings))
+    openBtn.bezelStyle = .rounded
+    openBtn.frame = NSRect(x: 24, y: 60, width: 160, height: 32)
+    cv.addSubview(openBtn)
+
+    let statusLabel = NSTextField(labelWithString: "等待授权...")
+    statusLabel.font = NSFont.systemFont(ofSize: 12)
+    statusLabel.textColor = .secondaryLabelColor
+    statusLabel.frame = NSRect(x: 200, y: 68, width: 200, height: 18)
+    cv.addSubview(statusLabel)
+
+    let laterBtn = NSButton(title: "稍后再说", target: menuActions, action: #selector(MenuActions.dismissAuthWindow))
+    laterBtn.bezelStyle = .rounded
+    laterBtn.frame = NSRect(x: 24, y: 20, width: 100, height: 28)
+    cv.addSubview(laterBtn)
+
+    authWindow = w
+    w.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
 }
 
 // MARK: - Menu Actions
 
 class MenuActions: NSObject, NSMenuDelegate {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        return true
+    }
+
     @objc func upload() {
         vlog("Manual upload triggered")
         DispatchQueue.global(qos: .userInitiated).async { runVPaste() }
@@ -381,6 +717,124 @@ class MenuActions: NSObject, NSMenuDelegate {
     @objc func clean1d() {
         DispatchQueue.global(qos: .userInitiated).async { runClean(hours: 24) }
     }
+
+    @objc func openSettings() {
+        showSettingsWindow()
+    }
+
+    @objc func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc func dismissAuthWindow() {
+        accessibilityPollTimer?.invalidate()
+        accessibilityPollTimer = nil
+        authWindow?.close()
+        authWindow = nil
+    }
+
+    @objc func closeSettings() {
+        settingsWindow?.close()
+    }
+
+    @objc func saveSettings() {
+        guard let w = settingsWindow,
+              let fields = objc_getAssociatedObject(w, "fields") as? SettingsFields else { return }
+
+        var cfg = VPasteConfig()
+        cfg.secretID = fields.secretIDField?.stringValue ?? ""
+        cfg.secretKey = fields.secretKeyField?.stringValue ?? ""
+        cfg.token = fields.tokenField?.stringValue ?? ""
+        cfg.bucket = fields.bucketField?.stringValue ?? ""
+        cfg.cdnDomain = fields.cdnDomainField?.stringValue ?? ""
+        cfg.uploadPath = fields.uploadPathField?.stringValue ?? "vpaste/temp"
+        cfg.tempRetentionHours = Int(fields.retentionField?.stringValue ?? "24") ?? 24
+
+        if let popup = fields.regionPopup,
+           let item = popup.selectedItem,
+           let code = item.representedObject as? String {
+            cfg.region = code
+        }
+
+        if saveVPasteConfig(cfg) {
+            vlog("Settings saved to \(configFilePath())")
+            let alert = NSAlert()
+            alert.messageText = "设置已保存"
+            alert.informativeText = "配置已写入 config.yaml。\n重启 VPaste daemon 后生效。"
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "好的")
+            alert.runModal()
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "保存失败"
+            alert.informativeText = "无法写入配置文件，请检查文件权限。"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "确定")
+            alert.runModal()
+        }
+    }
+
+    @objc func testConnection() {
+        guard let w = settingsWindow,
+              let fields = objc_getAssociatedObject(w, "fields") as? SettingsFields else { return }
+
+        // Temporarily save to test
+        var cfg = VPasteConfig()
+        cfg.secretID = fields.secretIDField?.stringValue ?? ""
+        cfg.secretKey = fields.secretKeyField?.stringValue ?? ""
+        cfg.token = fields.tokenField?.stringValue ?? ""
+        cfg.bucket = fields.bucketField?.stringValue ?? ""
+        cfg.cdnDomain = fields.cdnDomainField?.stringValue ?? ""
+        cfg.uploadPath = fields.uploadPathField?.stringValue ?? "vpaste/temp"
+
+        if let popup = fields.regionPopup,
+           let item = popup.selectedItem,
+           let code = item.representedObject as? String {
+            cfg.region = code
+        }
+
+        // Save temp config and run vpaste stats
+        let _ = saveVPasteConfig(cfg)
+
+        let vpastePath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/vpaste").path
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            task.arguments = ["-c", "\(vpastePath) stats 2>&1"]
+            let pipe = Pipe()
+            task.standardOutput = pipe
+            task.standardError = pipe
+
+            var output = "无法执行测试"
+            do {
+                try task.run()
+                task.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                output = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? output
+            } catch {
+                output = "测试失败: \(error.localizedDescription)"
+            }
+
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                if task.terminationStatus == 0 {
+                    alert.messageText = "连接成功"
+                    alert.alertStyle = .informational
+                } else {
+                    alert.messageText = "连接失败"
+                    alert.alertStyle = .warning
+                }
+                alert.informativeText = output
+                alert.addButton(withTitle: "确定")
+                alert.runModal()
+            }
+        }
+    }
 }
 
 // MARK: - Main
@@ -391,19 +845,61 @@ app.setActivationPolicy(.accessory)
 // Status bar icon
 let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 if let button = statusItem.button {
-    button.title = "V"
-    button.font = NSFont.boldSystemFont(ofSize: 14)
+    let icon = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+        // Blue gradient background
+        let bg = NSBezierPath(roundedRect: NSRect(x: 1, y: 1, width: 16, height: 16),
+                              xRadius: 3.5, yRadius: 3.5)
+        NSColor(red: 0.15, green: 0.47, blue: 0.82, alpha: 1.0).setFill()
+        bg.fill()
+
+        // Hollow V — even-odd fill: overlap becomes transparent
+        let v = NSBezierPath()
+        v.windingRule = .evenOdd
+        v.move(to: NSPoint(x: 3, y: 14))
+        v.line(to: NSPoint(x: 9, y: 3))
+        v.line(to: NSPoint(x: 15, y: 14))
+        v.close()
+        v.move(to: NSPoint(x: 6, y: 14))
+        v.line(to: NSPoint(x: 9, y: 6))
+        v.line(to: NSPoint(x: 12, y: 14))
+        v.close()
+        NSColor.white.setFill()
+        v.fill()
+        return true
+    }
+    button.image = icon
     button.toolTip = "VPaste - Cmd+Alt+V"
 }
 
 let menu = NSMenu()
-menu.addItem(withTitle: "上传剪贴板图片", action: #selector(MenuActions.upload), keyEquivalent: "")
-menu.addItem(withTitle: "历史记录", action: #selector(MenuActions.history), keyEquivalent: "")
+
+let uploadItem = NSMenuItem(title: "上传剪贴板图片", action: #selector(MenuActions.upload), keyEquivalent: "")
+uploadItem.target = menuActions
+menu.addItem(uploadItem)
+
+let historyItem = NSMenuItem(title: "历史记录", action: #selector(MenuActions.history), keyEquivalent: "")
+historyItem.target = menuActions
+menu.addItem(historyItem)
+
+let settingsItem = NSMenuItem(title: "设置...", action: #selector(MenuActions.openSettings), keyEquivalent: ",")
+settingsItem.target = menuActions
+menu.addItem(settingsItem)
 
 let cleanMenu = NSMenu()
-cleanMenu.addItem(withTitle: "7 天前上传的", action: #selector(MenuActions.clean7d), keyEquivalent: "")
-cleanMenu.addItem(withTitle: "3 天前上传的", action: #selector(MenuActions.clean3d), keyEquivalent: "")
-cleanMenu.addItem(withTitle: "1 天前上传的", action: #selector(MenuActions.clean1d), keyEquivalent: "")
+cleanMenu.delegate = menuActions
+
+let clean7d = NSMenuItem(title: "7 天前上传的", action: #selector(MenuActions.clean7d), keyEquivalent: "")
+clean7d.target = menuActions
+cleanMenu.addItem(clean7d)
+
+let clean3d = NSMenuItem(title: "3 天前上传的", action: #selector(MenuActions.clean3d), keyEquivalent: "")
+clean3d.target = menuActions
+cleanMenu.addItem(clean3d)
+
+let clean1d = NSMenuItem(title: "1 天前上传的", action: #selector(MenuActions.clean1d), keyEquivalent: "")
+clean1d.target = menuActions
+cleanMenu.addItem(clean1d)
+
 let cleanItem = NSMenuItem(title: "清理图床", action: nil, keyEquivalent: "")
 cleanItem.submenu = cleanMenu
 menu.addItem(cleanItem)
@@ -413,12 +909,14 @@ menu.addItem(withTitle: "退出 VPaste", action: #selector(NSApplication.termina
 menu.delegate = menuActions
 statusItem.menu = menu
 
-// Keyboard monitor
-setupKeyboardMonitor()
+// Check accessibility and register hotkey (like Rectangle)
+checkAccessibility()
 
-// Keep run loop active (required for CGEvent tap on macOS 26)
+// Keep run loop active for Carbon event dispatch
 Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { _ in }
 
-vlog("Daemon started - Cmd+Alt+V to upload")
+vlog("Daemon started")
+
+atexit { unregisterCarbonHotkey() }
 
 app.run()

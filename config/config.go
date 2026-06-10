@@ -56,6 +56,18 @@ func configFilePath() string {
 	return filepath.Join(home, ".config", "vpaste", "config.yaml")
 }
 
+func Save(cfg *Config) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+	path := configFilePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
 func ConfigFilePath() string {
 	return configFilePath()
 }
