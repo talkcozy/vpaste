@@ -105,6 +105,8 @@ var historyWindow: NSWindow?
 var historyTable: NSTableView?
 var historyRecords: [UploadRecord] = []
 var historyCountLabel: NSTextField?
+var historyImageView: NSImageView?
+var historyImageHeightConstraint: NSLayoutConstraint?
 let menuActions = MenuActions()
 
 func showHistoryWindow() {
@@ -117,13 +119,13 @@ func showHistoryWindow() {
     }
 
     let w = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 680, height: 480),
+        contentRect: NSRect(x: 0, y: 0, width: 720, height: 620),
         styleMask: [.titled, .closable, .resizable],
         backing: .buffered,
         defer: false
     )
     w.title = "VPaste 历史记录"
-    w.minSize = NSSize(width: 500, height: 300)
+    w.minSize = NSSize(width: 500, height: 400)
     w.center()
 
     guard let cv = w.contentView else { return }
@@ -177,6 +179,23 @@ func showHistoryWindow() {
     scroll.hasVerticalScroller = true
     cv.addSubview(scroll)
 
+    // Image preview panel
+    let imagePreview = NSImageView()
+    imagePreview.translatesAutoresizingMaskIntoConstraints = false
+    imagePreview.imageScaling = .scaleProportionallyUpOrDown
+    imagePreview.imageAlignment = .alignCenter
+    imagePreview.wantsLayer = true
+    imagePreview.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+    imagePreview.layer?.borderWidth = 1
+    imagePreview.layer?.borderColor = NSColor.separatorColor.cgColor
+    imagePreview.layer?.cornerRadius = 6
+    cv.addSubview(imagePreview)
+    historyImageView = imagePreview
+
+    let imageHeightConstraint = imagePreview.heightAnchor.constraint(equalToConstant: 220)
+    imageHeightConstraint.isActive = true
+    historyImageHeightConstraint = imageHeightConstraint
+
     NSLayoutConstraint.activate([
         toolbar.topAnchor.constraint(equalTo: cv.topAnchor),
         toolbar.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
@@ -189,7 +208,11 @@ func showHistoryWindow() {
         scroll.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
         scroll.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
         scroll.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
-        scroll.bottomAnchor.constraint(equalTo: cv.bottomAnchor),
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
+        imagePreview.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 1),
+        imagePreview.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
+        imagePreview.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
+        imagePreview.bottomAnchor.constraint(equalTo: cv.bottomAnchor),
     ])
 
     // Use a delegate class for table
@@ -277,8 +300,22 @@ class HistoryDelegate: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         if row < historyRecords.count {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(historyRecords[row].cdn_url, forType: .string)
+            loadPreviewImage(url: historyRecords[row].cdn_url)
         }
         return false
+    }
+
+    func loadPreviewImage(url: String) {
+        guard let imageURL = URL(string: url) else { return }
+        historyImageView?.image = nil
+
+        let task = URLSession.shared.dataTask(with: imageURL) { data, _, _ in
+            guard let data = data, let img = NSImage(data: data) else { return }
+            DispatchQueue.main.async {
+                historyImageView?.image = img
+            }
+        }
+        task.resume()
     }
 
     @objc func copyURL(_ sender: NSButton) {
@@ -321,11 +358,14 @@ class HistoryDelegate: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 // MARK: - YAML Config (simple flat key-value)
 
 struct VPasteConfig {
+    var provider: String = "cos"
     var secretID: String = ""
     var secretKey: String = ""
     var token: String = ""
     var bucket: String = ""
     var region: String = "ap-shanghai"
+    var endpoint: String = ""
+    var forcePathStyle: Bool = false
     var cdnDomain: String = ""
     var uploadPath: String = "vpaste/temp"
     var tempRetentionHours: Int = 24
@@ -352,11 +392,14 @@ func loadVPasteConfig() -> VPasteConfig {
             .trimmingCharacters(in: .whitespaces)
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
         switch key {
+        case "provider": cfg.provider = val
         case "secret_id": cfg.secretID = val
         case "secret_key": cfg.secretKey = val
         case "token": cfg.token = val
         case "bucket": cfg.bucket = val
         case "region": cfg.region = val
+        case "endpoint": cfg.endpoint = val
+        case "force_path_style": cfg.forcePathStyle = (val == "true")
         case "cdn_domain": cfg.cdnDomain = val
         case "upload_path": cfg.uploadPath = val
         case "temp_retention_hours":
@@ -369,13 +412,22 @@ func loadVPasteConfig() -> VPasteConfig {
 
 func saveVPasteConfig(_ cfg: VPasteConfig) -> Bool {
     var lines: [String] = []
+    lines.append("provider: \"\(cfg.provider)\"")
     lines.append("secret_id: \"\(cfg.secretID)\"")
     lines.append("secret_key: \"\(cfg.secretKey)\"")
     if !cfg.token.isEmpty {
         lines.append("token: \"\(cfg.token)\"")
     }
     lines.append("bucket: \"\(cfg.bucket)\"")
-    lines.append("region: \"\(cfg.region)\"")
+    if !cfg.region.isEmpty {
+        lines.append("region: \"\(cfg.region)\"")
+    }
+    if !cfg.endpoint.isEmpty {
+        lines.append("endpoint: \"\(cfg.endpoint)\"")
+    }
+    if cfg.forcePathStyle {
+        lines.append("force_path_style: true")
+    }
     if !cfg.cdnDomain.isEmpty {
         lines.append("cdn_domain: \"\(cfg.cdnDomain)\"")
     }
@@ -398,20 +450,19 @@ func saveVPasteConfig(_ cfg: VPasteConfig) -> Bool {
 
 var settingsWindow: NSWindow?
 
-let regionOptions = [
-    ("ap-beijing", "北京"),
-    ("ap-nanjing", "南京"),
-    ("ap-shanghai", "上海"),
-    ("ap-guangzhou", "广州"),
-    ("ap-chengdu", "成都"),
-    ("ap-chongqing", "重庆"),
-    ("ap-hongkong", "中国香港"),
-    ("ap-singapore", "新加坡"),
-    ("ap-tokyo", "东京"),
-    ("na-siliconvalley", "硅谷"),
-    ("na-ashburn", "弗吉尼亚"),
-    ("eu-frankfurt", "法兰克福"),
+let regionOptions: [(code: String, name: String)] = [
+    // COS regions
+    ("ap-beijing", "COS 北京"), ("ap-nanjing", "COS 南京"), ("ap-shanghai", "COS 上海"),
+    ("ap-guangzhou", "COS 广州"), ("ap-chengdu", "COS 成都"), ("ap-chongqing", "COS 重庆"),
+    ("ap-hongkong", "COS 香港"), ("ap-singapore", "COS 新加坡"), ("ap-tokyo", "COS 东京"),
+    ("na-siliconvalley", "COS 硅谷"), ("na-ashburn", "COS 弗吉尼亚"), ("eu-frankfurt", "COS 法兰克福"),
+    // AWS regions
+    ("us-east-1", "AWS 弗吉尼亚"), ("us-west-2", "AWS 俄勒冈"), ("eu-west-1", "AWS 爱尔兰"),
+    ("ap-northeast-1", "AWS 东京"), ("ap-southeast-1", "AWS 新加坡"),
 ]
+
+// Views that are COS-specific (hidden for S3/MinIO)
+var providerSpecificViews: [NSView] = []
 
 func showSettingsWindow() {
     if let w = settingsWindow {
@@ -421,9 +472,10 @@ func showSettingsWindow() {
     }
 
     let cfg = loadVPasteConfig()
+    providerSpecificViews.removeAll()
 
     let w = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
+        contentRect: NSRect(x: 0, y: 0, width: 520, height: 540),
         styleMask: [.titled, .closable],
         backing: .buffered,
         defer: false
@@ -434,75 +486,99 @@ func showSettingsWindow() {
 
     guard let cv = w.contentView else { return }
 
-    // --- Helper to create form rows ---
-    var currentY: CGFloat = 420
-    let labelWidth: CGFloat = 130
-    let fieldX: CGFloat = 150
-    let fieldWidth: CGFloat = 340
-    let rowHeight: CGFloat = 28
-    let sectionGap: CGFloat = 16
-    let rowGap: CGFloat = 6
+    var currentY: CGFloat = 500
+    let labelWidth: CGFloat = 110
+    let fieldX: CGFloat = 130
+    let fieldWidth: CGFloat = 360
+    let rowHeight: CGFloat = 26
+    let rowGap: CGFloat = 5
 
     func addSection(_ title: String) {
-        currentY -= sectionGap
+        currentY -= 12
         let label = NSTextField(labelWithString: title)
-        label.font = NSFont.boldSystemFont(ofSize: 13)
+        label.font = NSFont.boldSystemFont(ofSize: 12)
         label.textColor = .secondaryLabelColor
         label.frame = NSRect(x: 20, y: currentY, width: 480, height: 16)
         cv.addSubview(label)
-        currentY -= 20
+        currentY -= 18
     }
 
     func addRow(_ title: String, secure: Bool = false) -> NSTextField {
         currentY -= rowGap
         let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 13)
+        label.font = NSFont.systemFont(ofSize: 12)
         label.alignment = .right
         label.frame = NSRect(x: 20, y: currentY, width: labelWidth - 8, height: rowHeight)
         cv.addSubview(label)
 
         let field: NSTextField
         if secure {
-            let sf = NSSecureTextField(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
-            field = sf
+            field = NSSecureTextField(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
         } else {
             field = NSTextField(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
         }
-        field.font = NSFont.systemFont(ofSize: 13)
+        field.font = NSFont.systemFont(ofSize: 12)
         cv.addSubview(field)
         currentY -= rowHeight
         return field
     }
 
-    // --- COS Section ---
-    addSection("腾讯云 COS 配置")
-    let secretIDField = addRow("Secret ID:")
+    // --- Provider Section ---
+    addSection("存储服务")
+    currentY -= rowGap
+    let providerLabel = NSTextField(labelWithString: "服务商:")
+    providerLabel.font = NSFont.systemFont(ofSize: 12)
+    providerLabel.alignment = .right
+    providerLabel.frame = NSRect(x: 20, y: currentY, width: labelWidth - 8, height: rowHeight)
+    cv.addSubview(providerLabel)
+
+    let providerPopup = NSPopUpButton(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
+    providerPopup.addItems(withTitles: ["腾讯云 COS", "AWS S3", "MinIO / S3 兼容"])
+    providerPopup.lastItem?.representedObject = "cos"
+    providerPopup.item(at: 1)?.representedObject = "s3"
+    providerPopup.item(at: 2)?.representedObject = "minio"
+    let providers = ["cos", "s3", "minio"]
+    if let idx = providers.firstIndex(of: cfg.provider) {
+        providerPopup.selectItem(at: idx)
+    }
+    cv.addSubview(providerPopup)
+    currentY -= rowHeight
+
+    // --- Credentials Section ---
+    addSection("认证信息")
+    let secretIDField = addRow("Access Key:")
     secretIDField.stringValue = cfg.secretID
     let secretKeyField = addRow("Secret Key:", secure: true)
     secretKeyField.stringValue = cfg.secretKey
-    let tokenField = addRow("Token:")
+    let tokenField = addRow("Session Token:")
     tokenField.stringValue = cfg.token
     let bucketField = addRow("存储桶:")
     bucketField.stringValue = cfg.bucket
 
-    // Region popup
-    currentY -= rowGap
-    let regionLabel = NSTextField(labelWithString: "地域:")
-    regionLabel.font = NSFont.systemFont(ofSize: 13)
-    regionLabel.alignment = .right
-    regionLabel.frame = NSRect(x: 20, y: currentY, width: labelWidth - 8, height: rowHeight)
-    cv.addSubview(regionLabel)
+    // --- Endpoint (S3/MinIO) ---
+    addSection("连接配置")
+    let endpointField = addRow("Endpoint:")
+    endpointField.stringValue = cfg.endpoint
+    endpointField.placeholderString = "https://s3.amazonaws.com"
+    providerSpecificViews.append(endpointField)
+    // Also add the label for endpoint
+    if let label = cv.subviews.last(where: { $0 is NSTextField && $0 !== endpointField && $0.frame.width < 110 }) as? NSTextField {
+        providerSpecificViews.append(label)
+    }
 
-    let regionPopup = NSPopUpButton(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
-    for (code, name) in regionOptions {
-        regionPopup.addItem(withTitle: "\(code) (\(name))")
-        regionPopup.lastItem?.representedObject = code
-    }
-    // Select current region
-    if let idx = regionOptions.firstIndex(where: { $0.0 == cfg.region }) {
-        regionPopup.selectItem(at: idx)
-    }
-    cv.addSubview(regionPopup)
+    // Region (text field for all providers)
+    let regionField = addRow("Region:")
+    regionField.stringValue = cfg.region
+    regionField.placeholderString = "ap-shanghai"
+
+    // Force path style (MinIO)
+    currentY -= rowGap
+    let pathStyleCheck = NSButton(checkboxWithTitle: "使用路径样式 (MinIO 需要)", target: nil, action: nil)
+    pathStyleCheck.font = NSFont.systemFont(ofSize: 12)
+    pathStyleCheck.frame = NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight)
+    pathStyleCheck.state = cfg.forcePathStyle ? .on : .off
+    cv.addSubview(pathStyleCheck)
+    providerSpecificViews.append(pathStyleCheck)
     currentY -= rowHeight
 
     // --- Upload Section ---
@@ -511,6 +587,7 @@ func showSettingsWindow() {
     uploadPathField.stringValue = cfg.uploadPath
     let cdnDomainField = addRow("CDN 域名:")
     cdnDomainField.stringValue = cfg.cdnDomain
+    cdnDomainField.placeholderString = "可选，留空则用默认域名"
 
     // --- Cleanup Section ---
     addSection("自动清理")
@@ -518,40 +595,39 @@ func showSettingsWindow() {
     retentionField.stringValue = "\(cfg.tempRetentionHours)"
 
     // --- Buttons ---
-    currentY -= 20
+    currentY -= 16
     let buttonY = currentY
 
-    let saveBtn = NSButton(title: "保存", target: nil, action: #selector(MenuActions.saveSettings))
+    let saveBtn = NSButton(title: "保存", target: menuActions, action: #selector(MenuActions.saveSettings))
     saveBtn.bezelStyle = .rounded
     saveBtn.frame = NSRect(x: 380, y: buttonY, width: 80, height: 28)
     cv.addSubview(saveBtn)
 
-    let cancelBtn = NSButton(title: "取消", target: nil, action: #selector(MenuActions.closeSettings))
+    let cancelBtn = NSButton(title: "取消", target: menuActions, action: #selector(MenuActions.closeSettings))
     cancelBtn.bezelStyle = .rounded
     cancelBtn.frame = NSRect(x: 290, y: buttonY, width: 80, height: 28)
     cv.addSubview(cancelBtn)
 
-    let testBtn = NSButton(title: "测试连接", target: nil, action: #selector(MenuActions.testConnection))
+    let testBtn = NSButton(title: "测试连接", target: menuActions, action: #selector(MenuActions.testConnection))
     testBtn.bezelStyle = .rounded
     testBtn.frame = NSRect(x: 20, y: buttonY, width: 90, height: 28)
     cv.addSubview(testBtn)
 
     // Store references for save
     let fields = SettingsFields()
+    fields.providerPopup = providerPopup
     fields.secretIDField = secretIDField
     fields.secretKeyField = secretKeyField
     fields.tokenField = tokenField
     fields.bucketField = bucketField
-    fields.regionPopup = regionPopup
+    fields.endpointField = endpointField
+    fields.regionField = regionField
+    fields.pathStyleCheck = pathStyleCheck
     fields.uploadPathField = uploadPathField
     fields.cdnDomainField = cdnDomainField
     fields.retentionField = retentionField
     fields.window = w
     objc_setAssociatedObject(w, "fields", fields, .OBJC_ASSOCIATION_RETAIN)
-
-    saveBtn.target = menuActions
-    cancelBtn.target = menuActions
-    testBtn.target = menuActions
 
     settingsWindow = w
     w.makeKeyAndOrderFront(nil)
@@ -559,11 +635,14 @@ func showSettingsWindow() {
 }
 
 class SettingsFields: NSObject {
+    weak var providerPopup: NSPopUpButton?
     weak var secretIDField: NSTextField?
     weak var secretKeyField: NSTextField?
     weak var tokenField: NSTextField?
     weak var bucketField: NSTextField?
-    weak var regionPopup: NSPopUpButton?
+    weak var endpointField: NSTextField?
+    weak var regionField: NSTextField?
+    weak var pathStyleCheck: NSButton?
     weak var uploadPathField: NSTextField?
     weak var cdnDomainField: NSTextField?
     weak var retentionField: NSTextField?
@@ -722,6 +801,24 @@ class MenuActions: NSObject, NSMenuDelegate {
         showSettingsWindow()
     }
 
+    @objc func showHelp() {
+        let alert = NSAlert()
+        alert.messageText = "VPaste 使用帮助"
+        alert.informativeText = """
+        快捷键: Cmd + Option + V
+        截图或复制图片到剪贴板后，按快捷键即可上传并自动粘贴 CDN 地址。
+
+        状态栏菜单:
+        • 上传剪贴板图片 — 手动上传
+        • 历史记录 — 查看上传记录和大图预览
+        • 设置 — 配置云存储服务商
+        • 清理图床 — 删除云端旧文件
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "好的")
+        alert.runModal()
+    }
+
     @objc func openAccessibilitySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
@@ -744,19 +841,21 @@ class MenuActions: NSObject, NSMenuDelegate {
               let fields = objc_getAssociatedObject(w, "fields") as? SettingsFields else { return }
 
         var cfg = VPasteConfig()
+        if let popup = fields.providerPopup,
+           let item = popup.selectedItem,
+           let code = item.representedObject as? String {
+            cfg.provider = code
+        }
         cfg.secretID = fields.secretIDField?.stringValue ?? ""
         cfg.secretKey = fields.secretKeyField?.stringValue ?? ""
         cfg.token = fields.tokenField?.stringValue ?? ""
         cfg.bucket = fields.bucketField?.stringValue ?? ""
+        cfg.endpoint = fields.endpointField?.stringValue ?? ""
+        cfg.region = fields.regionField?.stringValue ?? ""
+        cfg.forcePathStyle = fields.pathStyleCheck?.state == .on
         cfg.cdnDomain = fields.cdnDomainField?.stringValue ?? ""
         cfg.uploadPath = fields.uploadPathField?.stringValue ?? "vpaste/temp"
         cfg.tempRetentionHours = Int(fields.retentionField?.stringValue ?? "24") ?? 24
-
-        if let popup = fields.regionPopup,
-           let item = popup.selectedItem,
-           let code = item.representedObject as? String {
-            cfg.region = code
-        }
 
         if saveVPasteConfig(cfg) {
             vlog("Settings saved to \(configFilePath())")
@@ -780,20 +879,21 @@ class MenuActions: NSObject, NSMenuDelegate {
         guard let w = settingsWindow,
               let fields = objc_getAssociatedObject(w, "fields") as? SettingsFields else { return }
 
-        // Temporarily save to test
         var cfg = VPasteConfig()
+        if let popup = fields.providerPopup,
+           let item = popup.selectedItem,
+           let code = item.representedObject as? String {
+            cfg.provider = code
+        }
         cfg.secretID = fields.secretIDField?.stringValue ?? ""
         cfg.secretKey = fields.secretKeyField?.stringValue ?? ""
         cfg.token = fields.tokenField?.stringValue ?? ""
         cfg.bucket = fields.bucketField?.stringValue ?? ""
+        cfg.endpoint = fields.endpointField?.stringValue ?? ""
+        cfg.region = fields.regionField?.stringValue ?? ""
+        cfg.forcePathStyle = fields.pathStyleCheck?.state == .on
         cfg.cdnDomain = fields.cdnDomainField?.stringValue ?? ""
         cfg.uploadPath = fields.uploadPathField?.stringValue ?? "vpaste/temp"
-
-        if let popup = fields.regionPopup,
-           let item = popup.selectedItem,
-           let code = item.representedObject as? String {
-            cfg.region = code
-        }
 
         // Save temp config and run vpaste stats
         let _ = saveVPasteConfig(cfg)
@@ -905,6 +1005,11 @@ cleanItem.submenu = cleanMenu
 menu.addItem(cleanItem)
 
 menu.addItem(.separator())
+
+let helpItem = NSMenuItem(title: "使用帮助", action: #selector(MenuActions.showHelp), keyEquivalent: "")
+helpItem.target = menuActions
+menu.addItem(helpItem)
+
 menu.addItem(withTitle: "退出 VPaste", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 menu.delegate = menuActions
 statusItem.menu = menu

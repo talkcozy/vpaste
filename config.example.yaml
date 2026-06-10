@@ -1,14 +1,28 @@
 # vpaste 配置文件
 # 复制到 ~/.config/vpaste/config.yaml 并填入你的配置
 
-secret_id: "your_cos_secret_id"
-secret_key: "your_cos_secret_key"
+# 存储服务商: "cos" (腾讯云) | "s3" (AWS S3) | "minio" (MinIO/S3兼容)
+provider: "cos"
+
+# 认证信息
+secret_id: "your_access_key"
+secret_key: "your_secret_key"
 # token: ""  # 可选，临时凭证时使用
 
-bucket: "your-bucket-name-1234567890"
+# 存储桶
+bucket: "your-bucket-name"
 region: "ap-shanghai"
+
+# S3/MinIO 专用配置
+# endpoint: "https://s3.amazonaws.com"    # AWS S3
+# endpoint: "http://localhost:9000"        # MinIO
+# force_path_style: true                   # MinIO 需要开启
+
+# CDN 域名（可选，留空则用默认域名）
 cdn_domain: "cdn.your-domain.com"
+
+# 上传路径前缀
 upload_path: "vpaste/temp"
 
 # 临时文件自动清理配置
-# temp_retention_hours: 24  # 文件保留时间（小时），默认24小时，超过此时间的文件会被清理
+# temp_retention_hours: 24  # 文件保留时间（小时），默认24小时

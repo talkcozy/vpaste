@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"vpaste/config"
+	"vpaste/storage"
 
 	"github.com/tencentyun/cos-go-sdk-v5"
 )
@@ -47,15 +48,8 @@ func NewCOSClient(cfg *config.Config) (*COSClient, error) {
 	}, nil
 }
 
-// UploadResult 上传结果
-type UploadResult struct {
-	Key    string // COS文件路径
-	CDNURL string // CDN访问地址
-	Size   int64  // 文件大小
-}
-
 // UploadFile uploads a local file to COS and returns the upload result
-func (c *COSClient) UploadFile(ctx context.Context, filePath string) (*UploadResult, error) {
+func (c *COSClient) UploadFile(ctx context.Context, filePath string) (*storage.UploadResult, error) {
 	// Read file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -82,7 +76,7 @@ func (c *COSClient) UploadFile(ctx context.Context, filePath string) (*UploadRes
 	}
 
 	// Return result
-	return &UploadResult{
+	return &storage.UploadResult{
 		Key:    key,
 		CDNURL: c.CDNURL(key),
 		Size:   int64(len(data)),

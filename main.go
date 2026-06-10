@@ -9,7 +9,25 @@ import (
 	"vpaste/config"
 	"vpaste/cos"
 	"vpaste/db"
+	"vpaste/s3client"
+	"vpaste/storage"
 )
+
+type StorageClient interface {
+	UploadFile(ctx context.Context, filePath string) (*storage.UploadResult, error)
+	DeleteFile(ctx context.Context, key string) error
+}
+
+func newStorageClient(cfg *config.Config) (StorageClient, error) {
+	switch cfg.Provider {
+	case "cos":
+		return cos.NewCOSClient(cfg)
+	case "s3", "minio":
+		return s3client.NewS3Client(cfg)
+	default:
+		return nil, fmt.Errorf("unknown provider: %s", cfg.Provider)
+	}
+}
 
 func main() {
 	// 检查子命令
@@ -64,10 +82,10 @@ func runUpload() error {
 	}
 	defer clipboard.CleanupTempFile(imagePath)
 
-	// Upload to COS
-	client, err := cos.NewCOSClient(cfg)
+	// Create storage client
+	client, err := newStorageClient(cfg)
 	if err != nil {
-		return fmt.Errorf("COS client error: %w", err)
+		return fmt.Errorf("storage client error: %w", err)
 	}
 
 	ctx := context.Background()
@@ -94,7 +112,7 @@ func runUpload() error {
 }
 
 // cleanupOldFiles 异步清理旧文件
-func cleanupOldFiles(ctx context.Context, client *cos.COSClient, database *db.DB, retentionHours int) {
+func cleanupOldFiles(ctx context.Context, client StorageClient, database *db.DB, retentionHours int) {
 	// 标记已经开始清理，避免重复执行
 	database.MarkCleaned()
 
@@ -125,9 +143,9 @@ func runClean(hoursOverride int) error {
 		return fmt.Errorf("config error: %w", err)
 	}
 
-	client, err := cos.NewCOSClient(cfg)
+	client, err := newStorageClient(cfg)
 	if err != nil {
-		return fmt.Errorf("COS client error: %w", err)
+		return fmt.Errorf("storage client error: %w", err)
 	}
 
 	database, err := db.New("")

@@ -9,14 +9,17 @@ import (
 )
 
 type Config struct {
+	Provider           string `yaml:"provider"`
 	SecretID           string `yaml:"secret_id"`
 	SecretKey          string `yaml:"secret_key"`
 	Token              string `yaml:"token"`
 	Bucket             string `yaml:"bucket"`
 	Region             string `yaml:"region"`
+	Endpoint           string `yaml:"endpoint"`
+	ForcePathStyle     bool   `yaml:"force_path_style"`
 	CDNDomain          string `yaml:"cdn_domain"`
 	UploadPath         string `yaml:"upload_path"`
-	TempRetentionHours int    `yaml:"temp_retention_hours"` // 临时文件保留时间（小时），默认24
+	TempRetentionHours int    `yaml:"temp_retention_hours"`
 }
 
 func Load() (*Config, error) {
@@ -32,8 +35,25 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
-	if cfg.SecretID == "" || cfg.SecretKey == "" || cfg.Bucket == "" || cfg.Region == "" {
-		return nil, fmt.Errorf("missing required fields: secret_id, secret_key, bucket, region")
+	if cfg.Provider == "" {
+		cfg.Provider = "cos"
+	}
+
+	// Validate required fields based on provider
+	switch cfg.Provider {
+	case "cos":
+		if cfg.SecretID == "" || cfg.SecretKey == "" || cfg.Bucket == "" || cfg.Region == "" {
+			return nil, fmt.Errorf("cos: missing required fields (secret_id, secret_key, bucket, region)")
+		}
+	case "s3", "minio":
+		if cfg.SecretID == "" || cfg.SecretKey == "" || cfg.Bucket == "" {
+			return nil, fmt.Errorf("%s: missing required fields (secret_id, secret_key, bucket)", cfg.Provider)
+		}
+		if cfg.Endpoint == "" {
+			return nil, fmt.Errorf("%s: missing required field (endpoint)", cfg.Provider)
+		}
+	default:
+		return nil, fmt.Errorf("unknown provider: %s (supported: cos, s3, minio)", cfg.Provider)
 	}
 
 	if cfg.UploadPath == "" {
