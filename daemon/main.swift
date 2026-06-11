@@ -76,11 +76,9 @@ func runVPaste() {
         if output == "NO_IMAGE" || output.isEmpty {
             vlog("No image in clipboard")
         } else {
-            // Copy URL to clipboard
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(output, forType: .string)
 
-            // Try auto-paste via CGEvent
             DispatchQueue.main.async {
                 let src = CGEventSource(stateID: .combinedSessionState)
                 CGEvent(keyboardEventSource: src, virtualKey: 0x37, keyDown: true)?.post(tap: .cgSessionEventTap)
@@ -99,15 +97,52 @@ func runVPaste() {
     }
 }
 
-// MARK: - History Window
+// MARK: - History Window (Photo viewer layout)
 
 var historyWindow: NSWindow?
-var historyTable: NSTableView?
 var historyRecords: [UploadRecord] = []
 var historyCountLabel: NSTextField?
-var historyImageView: NSImageView?
-var historyImageHeightConstraint: NSLayoutConstraint?
+var historyPreviewImage: NSImageView?
+var historyURLLabel: NSTextField?
+var historyInfoLabel: NSTextField?
+var historyThumbStrip: NSScrollView?
+var historySelectedIndex: Int = 0
+var historyImageCache: [String: NSImage] = [:]
 let menuActions = MenuActions()
+
+class ThumbItemView: NSView {
+    var recordIndex: Int = 0
+
+    @objc func clicked(_ gesture: NSClickGestureRecognizer) {
+        selectHistoryImage(index: recordIndex)
+    }
+}
+
+class ScaledImageView: NSImageView {
+    override func draw(_ dirtyRect: NSRect) {
+        guard let image = self.image else { return }
+        let imgSize = image.size
+        guard imgSize.width > 0, imgSize.height > 0 else { return }
+
+        // Calculate aspect-fit rect (centered, no distortion)
+        let scaleX = bounds.width / imgSize.width
+        let scaleY = bounds.height / imgSize.height
+        let scale = min(scaleX, scaleY)
+        let drawW = imgSize.width * scale
+        let drawH = imgSize.height * scale
+        let drawX = bounds.origin.x + (bounds.width - drawW) / 2
+        let drawY = bounds.origin.y + (bounds.height - drawH) / 2
+
+        image.draw(in: NSRect(x: drawX, y: drawY, width: drawW, height: drawH),
+                   from: .zero,
+                   operation: .sourceOver,
+                   fraction: 1.0)
+    }
+
+    override var intrinsicContentSize: NSSize {
+        return NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+}
 
 func showHistoryWindow() {
     loadRecords()
@@ -119,27 +154,26 @@ func showHistoryWindow() {
     }
 
     let w = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 720, height: 620),
+        contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
         styleMask: [.titled, .closable, .resizable],
         backing: .buffered,
         defer: false
     )
     w.title = "VPaste 历史记录"
-    w.minSize = NSSize(width: 500, height: 400)
+    w.minSize = NSSize(width: 600, height: 400)
+    w.isReleasedWhenClosed = false
     w.center()
 
     guard let cv = w.contentView else { return }
 
-    // Toolbar
+    // --- Toolbar ---
     let toolbar = NSView()
     toolbar.translatesAutoresizingMaskIntoConstraints = false
     cv.addSubview(toolbar)
 
-    let refreshBtn = NSButton(title: "刷新", target: nil, action: nil)
+    let refreshBtn = NSButton(title: "刷新", target: menuActions, action: #selector(MenuActions.refresh))
     refreshBtn.bezelStyle = .rounded
     refreshBtn.translatesAutoresizingMaskIntoConstraints = false
-    refreshBtn.target = menuActions
-    refreshBtn.action = #selector(MenuActions.refresh)
     toolbar.addSubview(refreshBtn)
 
     historyCountLabel = NSTextField(labelWithString: "")
@@ -148,85 +182,204 @@ func showHistoryWindow() {
     historyCountLabel!.translatesAutoresizingMaskIntoConstraints = false
     toolbar.addSubview(historyCountLabel!)
 
-    // Table
-    let table = NSTableView()
-    table.usesAlternatingRowBackgroundColors = true
-    table.rowHeight = 28
+    // --- Right sidebar (info + copy button) ---
+    let sidebar = NSView()
+    sidebar.translatesAutoresizingMaskIntoConstraints = false
+    cv.addSubview(sidebar)
 
-    let timeCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("time"))
-    timeCol.title = "时间"
-    timeCol.width = 140
-    table.addTableColumn(timeCol)
+    let copyBtn = NSButton(title: "复制链接", target: menuActions, action: #selector(MenuActions.copySelectedURL))
+    copyBtn.bezelStyle = .rounded
+    copyBtn.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+    copyBtn.translatesAutoresizingMaskIntoConstraints = false
+    sidebar.addSubview(copyBtn)
 
-    let sizeCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("size"))
-    sizeCol.title = "大小"
-    sizeCol.width = 70
-    table.addTableColumn(sizeCol)
+    historyURLLabel = NSTextField(labelWithString: "")
+    historyURLLabel!.font = NSFont.systemFont(ofSize: 11)
+    historyURLLabel!.textColor = .secondaryLabelColor
+    historyURLLabel!.lineBreakMode = .byTruncatingMiddle
+    historyURLLabel!.translatesAutoresizingMaskIntoConstraints = false
+    sidebar.addSubview(historyURLLabel!)
 
-    let urlCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("url"))
-    urlCol.title = "URL"
-    urlCol.width = 380
-    table.addTableColumn(urlCol)
+    historyInfoLabel = NSTextField(labelWithString: "")
+    historyInfoLabel!.font = NSFont.systemFont(ofSize: 11)
+    historyInfoLabel!.textColor = .tertiaryLabelColor
+    historyInfoLabel!.translatesAutoresizingMaskIntoConstraints = false
+    sidebar.addSubview(historyInfoLabel!)
 
-    let copyCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("copy"))
-    copyCol.title = ""
-    copyCol.width = 60
-    table.addTableColumn(copyCol)
+    NSLayoutConstraint.activate([
+        copyBtn.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 12),
+        copyBtn.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
+        copyBtn.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -12),
+        copyBtn.heightAnchor.constraint(equalToConstant: 32),
+        historyURLLabel!.topAnchor.constraint(equalTo: copyBtn.bottomAnchor, constant: 16),
+        historyURLLabel!.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
+        historyURLLabel!.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -12),
+        historyInfoLabel!.topAnchor.constraint(equalTo: historyURLLabel!.bottomAnchor, constant: 8),
+        historyInfoLabel!.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
+        historyInfoLabel!.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -12),
+    ])
 
-    let scroll = NSScrollView()
-    scroll.translatesAutoresizingMaskIntoConstraints = false
-    scroll.documentView = table
-    scroll.hasVerticalScroller = true
-    cv.addSubview(scroll)
+    // --- Main preview area ---
+    let previewContainer = NSView()
+    previewContainer.translatesAutoresizingMaskIntoConstraints = false
+    cv.addSubview(previewContainer)
 
-    // Image preview panel
-    let imagePreview = NSImageView()
-    imagePreview.translatesAutoresizingMaskIntoConstraints = false
-    imagePreview.imageScaling = .scaleProportionallyUpOrDown
-    imagePreview.imageAlignment = .alignCenter
-    imagePreview.wantsLayer = true
-    imagePreview.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-    imagePreview.layer?.borderWidth = 1
-    imagePreview.layer?.borderColor = NSColor.separatorColor.cgColor
-    imagePreview.layer?.cornerRadius = 6
-    cv.addSubview(imagePreview)
-    historyImageView = imagePreview
+    historyPreviewImage = ScaledImageView()
+    historyPreviewImage!.imageScaling = .scaleProportionallyUpOrDown
+    historyPreviewImage!.imageAlignment = .alignCenter
+    historyPreviewImage!.translatesAutoresizingMaskIntoConstraints = false
+    previewContainer.addSubview(historyPreviewImage!)
 
-    let imageHeightConstraint = imagePreview.heightAnchor.constraint(equalToConstant: 220)
-    imageHeightConstraint.isActive = true
-    historyImageHeightConstraint = imageHeightConstraint
+    NSLayoutConstraint.activate([
+        historyPreviewImage!.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor),
+        historyPreviewImage!.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor),
+        historyPreviewImage!.topAnchor.constraint(equalTo: previewContainer.topAnchor),
+        historyPreviewImage!.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor),
+    ])
 
+    // --- Bottom thumbnail strip ---
+    let thumbScroll = NSScrollView()
+    thumbScroll.translatesAutoresizingMaskIntoConstraints = false
+    thumbScroll.hasHorizontalScroller = true
+    thumbScroll.autohidesScrollers = true
+    thumbScroll.drawsBackground = false
+    cv.addSubview(thumbScroll)
+    historyThumbStrip = thumbScroll
+
+    let thumbContainer = NSView()
+    thumbScroll.documentView = thumbContainer
+
+    // --- Layout with Auto Layout ---
     NSLayoutConstraint.activate([
         toolbar.topAnchor.constraint(equalTo: cv.topAnchor),
         toolbar.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
         toolbar.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
-        toolbar.heightAnchor.constraint(equalToConstant: 40),
-        refreshBtn.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 16),
+        toolbar.heightAnchor.constraint(equalToConstant: 36),
+        refreshBtn.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 12),
         refreshBtn.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-        historyCountLabel!.leadingAnchor.constraint(equalTo: refreshBtn.trailingAnchor, constant: 12),
+        historyCountLabel!.leadingAnchor.constraint(equalTo: refreshBtn.trailingAnchor, constant: 10),
         historyCountLabel!.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-        scroll.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-        scroll.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
-        scroll.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
-        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
-        imagePreview.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 1),
-        imagePreview.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
-        imagePreview.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
-        imagePreview.bottomAnchor.constraint(equalTo: cv.bottomAnchor),
+
+        // Sidebar on the right
+        sidebar.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+        sidebar.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
+        sidebar.widthAnchor.constraint(equalToConstant: 200),
+        sidebar.bottomAnchor.constraint(equalTo: thumbScroll.topAnchor),
+
+        // Preview takes remaining space
+        previewContainer.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+        previewContainer.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
+        previewContainer.trailingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+        previewContainer.bottomAnchor.constraint(equalTo: thumbScroll.topAnchor),
+
+        // Thumbnail strip at bottom
+        thumbScroll.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
+        thumbScroll.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
+        thumbScroll.bottomAnchor.constraint(equalTo: cv.bottomAnchor),
+        thumbScroll.heightAnchor.constraint(equalToConstant: 110),
     ])
 
-    // Use a delegate class for table
-    let delegate = HistoryDelegate()
-    delegate.table = table
-    delegate.window = w
-    table.dataSource = delegate
-    table.delegate = delegate
-    objc_setAssociatedObject(table, "delegate", delegate, .OBJC_ASSOCIATION_RETAIN)
-
-    historyTable = table
     historyWindow = w
     w.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
+
+    DispatchQueue.main.async {
+        rebuildHistoryUI()
+    }
+}
+
+func rebuildHistoryUI() {
+    guard let thumbContainer = historyThumbStrip?.documentView else { return }
+    thumbContainer.subviews.forEach { $0.removeFromSuperview() }
+
+    let thumbSize: CGFloat = 80
+    let padding: CGFloat = 8
+    let totalCount = historyRecords.count
+
+    for (index, record) in historyRecords.enumerated() {
+        let x = CGFloat(index) * (thumbSize + padding) + padding
+        let item = ThumbItemView(frame: NSRect(x: x, y: 8, width: thumbSize, height: thumbSize + 20))
+        item.recordIndex = index
+
+        let imgView = NSImageView()
+        imgView.imageScaling = .scaleProportionallyUpOrDown
+        imgView.imageAlignment = .alignCenter
+        imgView.wantsLayer = true
+        imgView.layer?.cornerRadius = 4
+        imgView.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        imgView.frame = NSRect(x: 0, y: 18, width: thumbSize, height: thumbSize)
+        item.addSubview(imgView)
+
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm"
+        let label = NSTextField(labelWithString: fmt.string(from: record.uploaded_at))
+        label.font = NSFont.systemFont(ofSize: 9)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .center
+        label.frame = NSRect(x: 0, y: 0, width: thumbSize, height: 14)
+        item.addSubview(label)
+
+        if let cached = historyImageCache[record.cdn_url] {
+            imgView.image = cached
+        } else if let url = URL(string: record.cdn_url) {
+            let task = URLSession.shared.dataTask(with: url) { [weak imgView] data, _, _ in
+                guard let data = data, let img = NSImage(data: data) else { return }
+                DispatchQueue.main.async {
+                    historyImageCache[record.cdn_url] = img
+                    imgView?.image = img
+                }
+            }
+            task.resume()
+        }
+
+        let clickGesture = NSClickGestureRecognizer(target: item, action: #selector(ThumbItemView.clicked(_:)))
+        item.addGestureRecognizer(clickGesture)
+        thumbContainer.addSubview(item)
+    }
+
+    let totalW = CGFloat(totalCount) * (thumbSize + padding) + padding
+    thumbContainer.frame.size = NSSize(width: totalW, height: thumbSize + 28)
+
+    if totalCount > 0 {
+        selectHistoryImage(index: 0)
+    }
+
+    historyCountLabel?.stringValue = "共 \(totalCount) 张图片"
+}
+
+func selectHistoryImage(index: Int) {
+    guard index >= 0, index < historyRecords.count else { return }
+    historySelectedIndex = index
+    let record = historyRecords[index]
+
+    // Update preview
+    if let cached = historyImageCache[record.cdn_url] {
+        historyPreviewImage?.image = cached
+    } else if let url = URL(string: record.cdn_url) {
+        historyPreviewImage?.image = nil
+        let task = URLSession.shared.dataTask(with: url) { data, _, _ in
+            guard let data = data, let img = NSImage(data: data) else { return }
+            DispatchQueue.main.async {
+                historyImageCache[record.cdn_url] = img
+                if historySelectedIndex == index {
+                    historyPreviewImage?.image = img
+                }
+            }
+        }
+        task.resume()
+    }
+
+    // Update info
+    historyURLLabel?.stringValue = record.cdn_url
+    let fmt = DateFormatter()
+    fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    historyInfoLabel?.stringValue = "大小: \(formatBytesHistory(record.size))\n时间: \(fmt.string(from: record.uploaded_at))"
+}
+
+func formatBytesHistory(_ bytes: Int64) -> String {
+    if bytes < 1024 { return "\(bytes) B" }
+    if bytes < 1024 * 1024 { return String(format: "%.1f KB", Double(bytes) / 1024.0) }
+    return String(format: "%.1f MB", Double(bytes) / (1024.0 * 1024.0))
 }
 
 func loadRecords() {
@@ -235,8 +388,7 @@ func loadRecords() {
 
     guard let data = FileManager.default.contents(atPath: path) else {
         historyRecords = []
-        historyTable?.reloadData()
-        historyCountLabel?.stringValue = "共 0 条记录"
+        DispatchQueue.main.async { rebuildHistoryUI() }
         return
     }
 
@@ -250,112 +402,10 @@ func loadRecords() {
         historyRecords = []
     }
 
-    historyTable?.reloadData()
-    historyCountLabel?.stringValue = "共 \(historyRecords.count) 条记录"
+    DispatchQueue.main.async { rebuildHistoryUI() }
 }
 
-// MARK: - History Table Delegate
-
-class HistoryDelegate: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    weak var table: NSTableView?
-    weak var window: NSWindow?
-
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        return historyRecords.count
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row < historyRecords.count else { return nil }
-        let record = historyRecords[row]
-        let columnID = tableColumn?.identifier.rawValue ?? ""
-
-        switch columnID {
-        case "time":
-            let cell = makeCell(tableView: tableView, id: tableColumn!.identifier)
-            let fmt = DateFormatter()
-            fmt.dateFormat = "MM-dd HH:mm"
-            cell.textField?.stringValue = fmt.string(from: record.uploaded_at)
-            return cell
-        case "size":
-            let cell = makeCell(tableView: tableView, id: tableColumn!.identifier)
-            cell.textField?.stringValue = formatBytes(record.size)
-            return cell
-        case "url":
-            let cell = makeCell(tableView: tableView, id: tableColumn!.identifier)
-            cell.textField?.stringValue = record.cdn_url
-            cell.textField?.lineBreakMode = .byTruncatingMiddle
-            return cell
-        case "copy":
-            let btn = NSButton(title: "复制", target: self, action: #selector(copyURL(_:)))
-            btn.tag = row
-            btn.bezelStyle = .rounded
-            btn.font = NSFont.systemFont(ofSize: 11)
-            return btn
-        default:
-            return nil
-        }
-    }
-
-    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        if row < historyRecords.count {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(historyRecords[row].cdn_url, forType: .string)
-            loadPreviewImage(url: historyRecords[row].cdn_url)
-        }
-        return false
-    }
-
-    func loadPreviewImage(url: String) {
-        guard let imageURL = URL(string: url) else { return }
-        historyImageView?.image = nil
-
-        let task = URLSession.shared.dataTask(with: imageURL) { data, _, _ in
-            guard let data = data, let img = NSImage(data: data) else { return }
-            DispatchQueue.main.async {
-                historyImageView?.image = img
-            }
-        }
-        task.resume()
-    }
-
-    @objc func copyURL(_ sender: NSButton) {
-        let row = sender.tag
-        guard row < historyRecords.count else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(historyRecords[row].cdn_url, forType: .string)
-    }
-
-    private func makeCell(tableView: NSTableView, id: NSUserInterfaceItemIdentifier) -> NSTableCellView {
-        if let existing = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView {
-            return existing
-        }
-        let cell = NSTableCellView()
-        cell.identifier = id
-        let tf = NSTextField()
-        tf.isBordered = false
-        tf.isEditable = false
-        tf.drawsBackground = false
-        tf.font = NSFont.systemFont(ofSize: 13)
-        tf.lineBreakMode = .byTruncatingTail
-        tf.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(tf)
-        cell.textField = tf
-        NSLayoutConstraint.activate([
-            tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
-            tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-            tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
-        return cell
-    }
-
-    private func formatBytes(_ bytes: Int64) -> String {
-        if bytes < 1024 { return "\(bytes) B" }
-        if bytes < 1024 * 1024 { return String(format: "%.1f KB", Double(bytes) / 1024.0) }
-        return String(format: "%.1f MB", Double(bytes) / (1024.0 * 1024.0))
-    }
-}
-
-// MARK: - YAML Config (simple flat key-value)
+// MARK: - YAML Config
 
 struct VPasteConfig {
     var provider: String = "cos"
@@ -415,22 +465,12 @@ func saveVPasteConfig(_ cfg: VPasteConfig) -> Bool {
     lines.append("provider: \"\(cfg.provider)\"")
     lines.append("secret_id: \"\(cfg.secretID)\"")
     lines.append("secret_key: \"\(cfg.secretKey)\"")
-    if !cfg.token.isEmpty {
-        lines.append("token: \"\(cfg.token)\"")
-    }
+    if !cfg.token.isEmpty { lines.append("token: \"\(cfg.token)\"") }
     lines.append("bucket: \"\(cfg.bucket)\"")
-    if !cfg.region.isEmpty {
-        lines.append("region: \"\(cfg.region)\"")
-    }
-    if !cfg.endpoint.isEmpty {
-        lines.append("endpoint: \"\(cfg.endpoint)\"")
-    }
-    if cfg.forcePathStyle {
-        lines.append("force_path_style: true")
-    }
-    if !cfg.cdnDomain.isEmpty {
-        lines.append("cdn_domain: \"\(cfg.cdnDomain)\"")
-    }
+    if !cfg.region.isEmpty { lines.append("region: \"\(cfg.region)\"") }
+    if !cfg.endpoint.isEmpty { lines.append("endpoint: \"\(cfg.endpoint)\"") }
+    if cfg.forcePathStyle { lines.append("force_path_style: true") }
+    if !cfg.cdnDomain.isEmpty { lines.append("cdn_domain: \"\(cfg.cdnDomain)\"") }
     lines.append("upload_path: \"\(cfg.uploadPath)\"")
     lines.append("temp_retention_hours: \(cfg.tempRetentionHours)")
     let content = lines.joined(separator: "\n") + "\n"
@@ -450,20 +490,6 @@ func saveVPasteConfig(_ cfg: VPasteConfig) -> Bool {
 
 var settingsWindow: NSWindow?
 
-let regionOptions: [(code: String, name: String)] = [
-    // COS regions
-    ("ap-beijing", "COS 北京"), ("ap-nanjing", "COS 南京"), ("ap-shanghai", "COS 上海"),
-    ("ap-guangzhou", "COS 广州"), ("ap-chengdu", "COS 成都"), ("ap-chongqing", "COS 重庆"),
-    ("ap-hongkong", "COS 香港"), ("ap-singapore", "COS 新加坡"), ("ap-tokyo", "COS 东京"),
-    ("na-siliconvalley", "COS 硅谷"), ("na-ashburn", "COS 弗吉尼亚"), ("eu-frankfurt", "COS 法兰克福"),
-    // AWS regions
-    ("us-east-1", "AWS 弗吉尼亚"), ("us-west-2", "AWS 俄勒冈"), ("eu-west-1", "AWS 爱尔兰"),
-    ("ap-northeast-1", "AWS 东京"), ("ap-southeast-1", "AWS 新加坡"),
-]
-
-// Views that are COS-specific (hidden for S3/MinIO)
-var providerSpecificViews: [NSView] = []
-
 func showSettingsWindow() {
     if let w = settingsWindow {
         w.makeKeyAndOrderFront(nil)
@@ -472,10 +498,9 @@ func showSettingsWindow() {
     }
 
     let cfg = loadVPasteConfig()
-    providerSpecificViews.removeAll()
 
     let w = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 520, height: 540),
+        contentRect: NSRect(x: 0, y: 0, width: 500, height: 560),
         styleMask: [.titled, .closable],
         backing: .buffered,
         defer: false
@@ -486,29 +511,40 @@ func showSettingsWindow() {
 
     guard let cv = w.contentView else { return }
 
-    var currentY: CGFloat = 500
-    let labelWidth: CGFloat = 110
-    let fieldX: CGFloat = 130
-    let fieldWidth: CGFloat = 360
-    let rowHeight: CGFloat = 26
-    let rowGap: CGFloat = 5
+    var currentY: CGFloat = 520
+    let labelWidth: CGFloat = 100
+    let fieldX: CGFloat = 120
+    let fieldWidth: CGFloat = 350
+    let rowHeight: CGFloat = 24
+    let rowGap: CGFloat = 6
 
     func addSection(_ title: String) {
-        currentY -= 12
+        currentY -= 16
+        let line = NSBox()
+        line.boxType = .separator
+        line.translatesAutoresizingMaskIntoConstraints = false
+        cv.addSubview(line)
+        NSLayoutConstraint.activate([
+            line.leadingAnchor.constraint(equalTo: cv.leadingAnchor, constant: 16),
+            line.trailingAnchor.constraint(equalTo: cv.trailingAnchor, constant: -16),
+            line.topAnchor.constraint(equalTo: cv.topAnchor, constant: -currentY + 2),
+        ])
+        currentY -= 4
         let label = NSTextField(labelWithString: title)
-        label.font = NSFont.boldSystemFont(ofSize: 12)
-        label.textColor = .secondaryLabelColor
-        label.frame = NSRect(x: 20, y: currentY, width: 480, height: 16)
+        label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        label.textColor = .tertiaryLabelColor
+        label.frame = NSRect(x: 16, y: currentY, width: 460, height: 14)
         cv.addSubview(label)
-        currentY -= 18
+        currentY -= 20
     }
 
-    func addRow(_ title: String, secure: Bool = false) -> NSTextField {
+    func addRow(_ title: String, secure: Bool = false, placeholder: String = "") -> NSTextField {
         currentY -= rowGap
         let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 12)
+        label.font = NSFont.systemFont(ofSize: 13)
         label.alignment = .right
-        label.frame = NSRect(x: 20, y: currentY, width: labelWidth - 8, height: rowHeight)
+        label.textColor = .labelColor
+        label.frame = NSRect(x: 16, y: currentY, width: labelWidth - 4, height: rowHeight)
         cv.addSubview(label)
 
         let field: NSTextField
@@ -517,19 +553,20 @@ func showSettingsWindow() {
         } else {
             field = NSTextField(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
         }
-        field.font = NSFont.systemFont(ofSize: 12)
+        field.font = NSFont.systemFont(ofSize: 13)
+        if !placeholder.isEmpty { field.placeholderString = placeholder }
         cv.addSubview(field)
         currentY -= rowHeight
         return field
     }
 
-    // --- Provider Section ---
     addSection("存储服务")
     currentY -= rowGap
-    let providerLabel = NSTextField(labelWithString: "服务商:")
-    providerLabel.font = NSFont.systemFont(ofSize: 12)
+    let providerLabel = NSTextField(labelWithString: "服务商")
+    providerLabel.font = NSFont.systemFont(ofSize: 13)
     providerLabel.alignment = .right
-    providerLabel.frame = NSRect(x: 20, y: currentY, width: labelWidth - 8, height: rowHeight)
+    providerLabel.textColor = .labelColor
+    providerLabel.frame = NSRect(x: 16, y: currentY, width: labelWidth - 4, height: rowHeight)
     cv.addSubview(providerLabel)
 
     let providerPopup = NSPopUpButton(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
@@ -544,58 +581,40 @@ func showSettingsWindow() {
     cv.addSubview(providerPopup)
     currentY -= rowHeight
 
-    // --- Credentials Section ---
     addSection("认证信息")
-    let secretIDField = addRow("Access Key:")
+    let secretIDField = addRow("Access Key", placeholder: "AKID...")
     secretIDField.stringValue = cfg.secretID
-    let secretKeyField = addRow("Secret Key:", secure: true)
+    let secretKeyField = addRow("Secret Key", secure: true, placeholder: "••••••••")
     secretKeyField.stringValue = cfg.secretKey
-    let tokenField = addRow("Session Token:")
+    let tokenField = addRow("Session Token", placeholder: "临时凭证时填写")
     tokenField.stringValue = cfg.token
-    let bucketField = addRow("存储桶:")
+    let bucketField = addRow("存储桶", placeholder: "my-bucket")
     bucketField.stringValue = cfg.bucket
 
-    // --- Endpoint (S3/MinIO) ---
     addSection("连接配置")
-    let endpointField = addRow("Endpoint:")
+    let endpointField = addRow("Endpoint", placeholder: "https://s3.amazonaws.com")
     endpointField.stringValue = cfg.endpoint
-    endpointField.placeholderString = "https://s3.amazonaws.com"
-    providerSpecificViews.append(endpointField)
-    // Also add the label for endpoint
-    if let label = cv.subviews.last(where: { $0 is NSTextField && $0 !== endpointField && $0.frame.width < 110 }) as? NSTextField {
-        providerSpecificViews.append(label)
-    }
-
-    // Region (text field for all providers)
-    let regionField = addRow("Region:")
+    let regionField = addRow("Region", placeholder: "ap-shanghai")
     regionField.stringValue = cfg.region
-    regionField.placeholderString = "ap-shanghai"
-
-    // Force path style (MinIO)
     currentY -= rowGap
     let pathStyleCheck = NSButton(checkboxWithTitle: "使用路径样式 (MinIO 需要)", target: nil, action: nil)
-    pathStyleCheck.font = NSFont.systemFont(ofSize: 12)
+    pathStyleCheck.font = NSFont.systemFont(ofSize: 13)
     pathStyleCheck.frame = NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight)
     pathStyleCheck.state = cfg.forcePathStyle ? .on : .off
     cv.addSubview(pathStyleCheck)
-    providerSpecificViews.append(pathStyleCheck)
     currentY -= rowHeight
 
-    // --- Upload Section ---
     addSection("上传配置")
-    let uploadPathField = addRow("上传路径:")
+    let uploadPathField = addRow("上传路径", placeholder: "vpaste/temp")
     uploadPathField.stringValue = cfg.uploadPath
-    let cdnDomainField = addRow("CDN 域名:")
+    let cdnDomainField = addRow("CDN 域名", placeholder: "可选")
     cdnDomainField.stringValue = cfg.cdnDomain
-    cdnDomainField.placeholderString = "可选，留空则用默认域名"
 
-    // --- Cleanup Section ---
     addSection("自动清理")
-    let retentionField = addRow("保留时间(小时):")
+    let retentionField = addRow("保留时间(小时)", placeholder: "24")
     retentionField.stringValue = "\(cfg.tempRetentionHours)"
 
-    // --- Buttons ---
-    currentY -= 16
+    currentY -= 20
     let buttonY = currentY
 
     let saveBtn = NSButton(title: "保存", target: menuActions, action: #selector(MenuActions.saveSettings))
@@ -613,7 +632,6 @@ func showSettingsWindow() {
     testBtn.frame = NSRect(x: 20, y: buttonY, width: 90, height: 28)
     cv.addSubview(testBtn)
 
-    // Store references for save
     let fields = SettingsFields()
     fields.providerPopup = providerPopup
     fields.secretIDField = secretIDField
@@ -654,7 +672,6 @@ class SettingsFields: NSObject {
 var hotkeyRef: EventHotKeyRef?
 
 private let kVK_ANSI_V: UInt32 = 9
-private let kVK_Command: UInt32 = 0x37
 
 func hotkeyHandler(_: EventHandlerCallRef?, _ event: EventRef?, _: UnsafeMutableRawPointer?) -> OSStatus {
     var hotkeyID = EventHotKeyID()
@@ -669,14 +686,12 @@ func hotkeyHandler(_: EventHandlerCallRef?, _ event: EventRef?, _: UnsafeMutable
 func setupCarbonHotkey() {
     var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                   eventKind: UInt32(kEventHotKeyPressed))
-
     InstallEventHandler(GetApplicationEventTarget(), hotkeyHandler, 1, &eventType, nil, nil)
 
     let signature: OSType = 0x56505354 // "VPST"
     let hotkeyID = EventHotKeyID(signature: signature, id: 1)
     RegisterEventHotKey(kVK_ANSI_V, UInt32(cmdKey | optionKey), hotkeyID,
                         GetApplicationEventTarget(), 0, &hotkeyRef)
-
     vlog("Carbon hotkey registered: Cmd+Option+V")
 }
 
@@ -768,38 +783,32 @@ func showAuthWindow() {
 // MARK: - Menu Actions
 
 class MenuActions: NSObject, NSMenuDelegate {
-    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        return true
-    }
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { return true }
 
     @objc func upload() {
         vlog("Manual upload triggered")
         DispatchQueue.global(qos: .userInitiated).async { runVPaste() }
     }
 
-    @objc func history() {
-        showHistoryWindow()
+    @objc func history() { showHistoryWindow() }
+
+    @objc func refresh() { loadRecords() }
+
+    @objc func copySelectedURL() {
+        guard historySelectedIndex < historyRecords.count else { return }
+        let url = historyRecords[historySelectedIndex].cdn_url
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url, forType: .string)
+        vlog("Copied: \(url)")
     }
 
-    @objc func refresh() {
-        loadRecords()
-    }
+    @objc func clean7d() { DispatchQueue.global(qos: .userInitiated).async { runClean(hours: 168) } }
 
-    @objc func clean7d() {
-        DispatchQueue.global(qos: .userInitiated).async { runClean(hours: 168) }
-    }
+    @objc func clean3d() { DispatchQueue.global(qos: .userInitiated).async { runClean(hours: 72) } }
 
-    @objc func clean3d() {
-        DispatchQueue.global(qos: .userInitiated).async { runClean(hours: 72) }
-    }
+    @objc func clean1d() { DispatchQueue.global(qos: .userInitiated).async { runClean(hours: 24) } }
 
-    @objc func clean1d() {
-        DispatchQueue.global(qos: .userInitiated).async { runClean(hours: 24) }
-    }
-
-    @objc func openSettings() {
-        showSettingsWindow()
-    }
+    @objc func openSettings() { showSettingsWindow() }
 
     @objc func showHelp() {
         let alert = NSAlert()
@@ -809,10 +818,10 @@ class MenuActions: NSObject, NSMenuDelegate {
         截图或复制图片到剪贴板后，按快捷键即可上传并自动粘贴 CDN 地址。
 
         状态栏菜单:
-        • 上传剪贴板图片 — 手动上传
-        • 历史记录 — 查看上传记录和大图预览
-        • 设置 — 配置云存储服务商
-        • 清理图床 — 删除云端旧文件
+        · 上传剪贴板图片 — 手动上传
+        · 历史记录 — 查看上传记录（点击复制 URL）
+        · 设置 — 配置云存储服务商
+        · 清理图床 — 删除云端旧文件
         """
         alert.alertStyle = .informational
         alert.addButton(withTitle: "好的")
@@ -832,9 +841,7 @@ class MenuActions: NSObject, NSMenuDelegate {
         authWindow = nil
     }
 
-    @objc func closeSettings() {
-        settingsWindow?.close()
-    }
+    @objc func closeSettings() { settingsWindow?.close() }
 
     @objc func saveSettings() {
         guard let w = settingsWindow,
@@ -879,6 +886,7 @@ class MenuActions: NSObject, NSMenuDelegate {
         guard let w = settingsWindow,
               let fields = objc_getAssociatedObject(w, "fields") as? SettingsFields else { return }
 
+        // Build config from fields (DO NOT save to disk)
         var cfg = VPasteConfig()
         if let popup = fields.providerPopup,
            let item = popup.selectedItem,
@@ -895,7 +903,9 @@ class MenuActions: NSObject, NSMenuDelegate {
         cfg.cdnDomain = fields.cdnDomainField?.stringValue ?? ""
         cfg.uploadPath = fields.uploadPathField?.stringValue ?? "vpaste/temp"
 
-        // Save temp config and run vpaste stats
+        // Write to temp file, test, then restore original
+        let configPath = configFilePath()
+        let originalData = FileManager.default.contents(atPath: configPath)
         let _ = saveVPasteConfig(cfg)
 
         let vpastePath = FileManager.default.homeDirectoryForCurrentUser
@@ -918,6 +928,13 @@ class MenuActions: NSObject, NSMenuDelegate {
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? output
             } catch {
                 output = "测试失败: \(error.localizedDescription)"
+            }
+
+            // Restore original config
+            if let orig = originalData {
+                try? orig.write(to: URL(fileURLWithPath: configPath))
+            } else {
+                try? FileManager.default.removeItem(atPath: configPath)
             }
 
             DispatchQueue.main.async {
@@ -946,13 +963,11 @@ app.setActivationPolicy(.accessory)
 let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 if let button = statusItem.button {
     let icon = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
-        // Blue gradient background
         let bg = NSBezierPath(roundedRect: NSRect(x: 1, y: 1, width: 16, height: 16),
                               xRadius: 3.5, yRadius: 3.5)
         NSColor(red: 0.15, green: 0.47, blue: 0.82, alpha: 1.0).setFill()
         bg.fill()
 
-        // Hollow V — even-odd fill: overlap becomes transparent
         let v = NSBezierPath()
         v.windingRule = .evenOdd
         v.move(to: NSPoint(x: 3, y: 14))
@@ -1014,10 +1029,8 @@ menu.addItem(withTitle: "退出 VPaste", action: #selector(NSApplication.termina
 menu.delegate = menuActions
 statusItem.menu = menu
 
-// Check accessibility and register hotkey (like Rectangle)
 checkAccessibility()
 
-// Keep run loop active for Carbon event dispatch
 Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { _ in }
 
 vlog("Daemon started")
