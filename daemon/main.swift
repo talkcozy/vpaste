@@ -500,7 +500,7 @@ func showSettingsWindow() {
     let cfg = loadVPasteConfig()
 
     let w = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 500, height: 560),
+        contentRect: NSRect(x: 0, y: 0, width: 500, height: 620),
         styleMask: [.titled, .closable],
         backing: .buffered,
         defer: false
@@ -511,7 +511,7 @@ func showSettingsWindow() {
 
     guard let cv = w.contentView else { return }
 
-    var currentY: CGFloat = 520
+    var currentY: CGFloat = 580
     let labelWidth: CGFloat = 100
     let fieldX: CGFloat = 120
     let fieldWidth: CGFloat = 350
@@ -570,11 +570,21 @@ func showSettingsWindow() {
     cv.addSubview(providerLabel)
 
     let providerPopup = NSPopUpButton(frame: NSRect(x: fieldX, y: currentY, width: fieldWidth, height: rowHeight))
-    providerPopup.addItems(withTitles: ["腾讯云 COS", "AWS S3", "MinIO / S3 兼容"])
+    providerPopup.addItems(withTitles: [
+        "腾讯云 COS",
+        "AWS S3",
+        "阿里云 OSS",
+        "火山云 TOS",
+        "百度云 BOS",
+        "MinIO / 自建 S3",
+    ])
     providerPopup.lastItem?.representedObject = "cos"
     providerPopup.item(at: 1)?.representedObject = "s3"
-    providerPopup.item(at: 2)?.representedObject = "minio"
-    let providers = ["cos", "s3", "minio"]
+    providerPopup.item(at: 2)?.representedObject = "s3"   // OSS uses S3 protocol
+    providerPopup.item(at: 3)?.representedObject = "s3"   // TOS uses S3 protocol
+    providerPopup.item(at: 4)?.representedObject = "s3"   // BOS uses S3 protocol
+    providerPopup.item(at: 5)?.representedObject = "minio"
+    let providers = ["cos", "s3", "s3", "s3", "s3", "minio"]
     if let idx = providers.firstIndex(of: cfg.provider) {
         providerPopup.selectItem(at: idx)
     }
@@ -592,7 +602,7 @@ func showSettingsWindow() {
     bucketField.stringValue = cfg.bucket
 
     addSection("连接配置")
-    let endpointField = addRow("Endpoint", placeholder: "https://s3.amazonaws.com")
+    let endpointField = addRow("Endpoint", placeholder: "S3/OSS/TOS/BOS/MinIO 端点地址")
     endpointField.stringValue = cfg.endpoint
     let regionField = addRow("Region", placeholder: "ap-shanghai")
     regionField.stringValue = cfg.region
